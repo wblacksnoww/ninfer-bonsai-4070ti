@@ -4,6 +4,10 @@
 引擎源码与指南工具链以 Apache-2.0 **随仓库分发**于 `vendor/`（保留原 LICENSE/NOTICE 文件于其目录内）：
 
 - `vendor/ninfer-4090w-ternary/` —— 引擎源码树（源自官方交付包 src-tree，剔除了 Windows 专用 ffmpeg/ 二进制目录）
+- `vendor/ninfer-4090w-ternary-a3/` —— A3 引擎源码树（pkg2 r12 树 + P1/P2/A3 补丁）
+- `vendor/ninfer-fusion-kvmem/` —— **fusion KVMem 环线引擎源码**（上游
+  [1314521gjy/ninfer-fusion-kvmem](https://github.com/1314521gjy/ninfer-fusion-kvmem)
+  @ `acba3d4` 原样导出，Apache-2.0，含其 LICENSE/NOTICE.md 于目录内；不含编译产物）
 - `vendor/shensanshu-guide/` —— 魔搭指南的工具链副本（pack.py / verify 套件 / changed-files 补丁）
 
 所有被引用的组件归属原作：
