@@ -12,6 +12,8 @@ tmp-nvcc/
 
 # 运行产物
 perf-results-*.json
+# docker/ 下的存档例外：文档引用的双线对照证据（docs/性能实测.md §9）
+!docker/perf-results-*.json
 suite-results-*.json
 *.log
 *.pid
@@ -20,3 +22,6 @@ suite-results-*.json
 __pycache__/
 *.pyc
 HANDOFF.md
+
+# 魔搭上传缓存（scripts/upload-modelscope.sh 生成）
+.ms_upload_cache
