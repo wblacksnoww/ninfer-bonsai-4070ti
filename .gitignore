@@ -25,3 +25,10 @@ HANDOFF.md
 
 # 魔搭上传缓存（scripts/upload-modelscope.sh 生成）
 .ms_upload_cache
+
+# vendor/ 内上游引擎源码树的 models/ 与验证读数 .log 必须完整入库
+#（上面的 models/、*.log 规则只针对本仓库自身的制品与运行产物；
+#  漏排会导致 CI 里 fusion 引擎 configure 报 add_subdirectory models 不存在）
+!vendor/ninfer-fusion-kvmem/**/models/
+!vendor/ninfer-fusion-kvmem/**/models/**
+!vendor/ninfer-fusion-kvmem/**/*.log
