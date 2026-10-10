@@ -1,0 +1,120 @@
+# =============================================================================
+# NInfer Fusion KVMem · 三元 Bonsai-2-27B —— docker-compose 配置（fusion 线）
+#
+# 与 docker/docker-compose.yml（老线）二选一；也与宿主 start-ninfer.sh /
+# start-fusion.sh 互斥：共用一张卡（12GB 装不下两条），先停对方再启动。
+#
+# 用法（在仓库根目录执行；不在 docker 组时前缀 sudo）:
+#   docker compose -f docker/docker-compose.fusion.yml up -d      # 启动
+#   docker compose -f docker/docker-compose.fusion.yml logs -f    # 跟随日志
+#   docker compose -f docker/docker-compose.fusion.yml ps         # 状态
+#   docker compose -f docker/docker-compose.fusion.yml down       # 停止并移除
+#
+# 前置:
+#   1) 镜像:   ./docker/build-image.sh -l fusion        # 或 docker pull ghcr.io/<owner>/ninfer-bonsai:latest-fusion
+#   2) 制品:   ./docker/fetch-model.sh --ms-fusion      # v3 三件放 models/fusion/（本 compose 用全量件）
+#
+# ⚠ 本线硬约束（引擎设计，改参数前先读 docs/Fusion-KVMem-部署与运行.md）:
+#   · 只认 v3 容器制品（models/fusion/ 三件）；老线 artifacts-pq2.ninfer 是 v2，会拒载
+#   · 只支持 --max-concurrency 1；--max-shared-prefixes 0 必须带
+#   · 别设 NINFER_KV_RETRIEVE=0（超池时会静默答错）；留空=引擎自动
+#   · 换瘦身件/PTQ1 件：改下方制品映射与 command 的 --spec/--draft-tokens，并删 --vision、
+#     把 NINFER_KV_WINDOW 改 131072（对照 scripts/start-fusion.sh 的 fusion-mtp / fusion-ptq1 档）
+# =============================================================================
+name: ninfer-fusion
+
+services:
+  ninfer-fusion-serve:
+    # ---- 镜像（build-image.sh -l fusion 的产物；40 系 89 / 50 系可 -a 120a 后改 tag）----
+    image: ninfer-bonsai:cuda13.3-arch89-fusion
+    container_name: ninfer-fusion-serve
+    restart: unless-stopped        # 崩溃/开机自动拉起；不想自启改为 "no"
+    # ---- 端口映射：宿主端口:容器内端口（容器内 8088 固定，换宿主端口只改左边）----
+    ports:
+      - "8089:8088"                # 默认 8089 避让宿主线的 8088；与 ZCode 客户端对接改 "8088:8088"
+    # ---- 目录映射：宿主路径:容器内路径:读写权限（左侧改成你的实际路径）----
+    volumes:
+      # v3 全量件（8.87 GiB：text+mtp+dflash2+proposal+vision；只读挂载，不进镜像）
+      # 相对路径相对本文件所在 docker/ 目录推导；可用 NINFER_ARTIFACT 覆盖或改绝对路径
+      - ${NINFER_ARTIFACT:-../models/fusion/Ternary-Bonsai-2-27B-ninfer-v3.ninfer}:/models/model.ninfer:ro
+    # ---- GPU：整卡透传（显存预算与宿主直跑相同：约 8.9 GiB 权重 + ~2.5 GiB 运行时）----
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all           # 多卡指定某张卡：改成 1 或 "0,1"
+              capabilities: [gpu]
+    # ---- 启动命令：与 scripts/start-fusion.sh 的 fusion 默认档同款，每个参数一行注释 ----
+    command:
+      - ninfer-serve
+      # 制品路径：对应上方 volumes 右侧的容器内路径，不用改
+      - /models/model.ninfer
+      # 监听地址：容器内必须 0.0.0.0（否则端口映射不通）
+      - --host
+      - "0.0.0.0"
+      # 容器内端口：与上方 ports 右侧保持一致
+      - --port
+      - "8088"
+      # 对外模型名：OpenAI 客户端按此调用（ZCode 已按 qwen3.8-27b 配置）
+      - --model-id
+      - "qwen3.8-27b"
+      # ================= 上下文（环线口径：逻辑上下文 ≫ 设备池）=================
+      # 逻辑上下文上限：262144（原生窗口；超出常驻窗口的部分在主机层 + 按需检索）
+      - --max-context
+      - "262144"
+      # KV 池容量：auto = 引擎按可用显存自适应（12GB 实测被显存封顶到 ~5.5万 token，属正常）
+      - --kv-capacity
+      - "auto"
+      # 显存余量预留（MiB）：给桌面/其他进程留 1024；池被压太小时加大它会更小，装不下就减小
+      - --kv-headroom-mib
+      - "1024"
+      # KV 精度：rk4v4-e8（环线专属；每页 1.10 MiB，质量代价实测 +0.30% 困惑度）
+      - --kv-dtype
+      - "rk4v4-e8"
+      # 预填分块（token）：环线推荐 512（每块跑一次内容打分/选页）
+      - --prefill-chunk
+      - "512"
+      # 主机层 KV 预算（MiB，吃的是内存不是显存）：8192 = 262144 逻辑上下文的推荐值
+      #   报 FATAL 点名 host_pages 就按报文数字抬高
+      - --host-kv-mib
+      - "8192"
+      # 并发：环只服务一条活跃序列，>1 直接拒启（要并发请切回老线）
+      - --max-concurrency
+      - "1"
+      # 共享前缀数：环线必须 0（只有同一会话多轮才走 host-backed 复用）
+      - --max-shared-prefixes
+      - "0"
+      # 无 max_tokens 请求的默认输出上限（防"思考吃满、正文为空"，项目账本 B37）
+      - --default-max-tokens
+      - "32768"
+      # ================= 投机解码（全量件用 DFlash2；瘦身件/PTQ1 件改 --spec mtp）=================
+      - --spec
+      - "dflash2"
+      # lm-head-draft：用 LM head 做草稿（dflash2 配套，全量件专属）
+      - --lm-head-draft
+      # 每轮草稿 token 数：4（环线实测口径，见 docs/性能实测.md）
+      - --draft-tokens
+      - "4"
+      # GDN 状态半精度：省显存，环线默认口径
+      - --gdn-state-fp16
+      # ================= 视觉（仅全量件有视觉塔；瘦身件/PTQ1 件必须删掉下面两行）=================
+      # 视觉默认开（与老线同惯例）；显存紧时删掉本行，或加 --vision-residency overlay/cpu
+      - --vision
+      # 显存富裕时开 CUDA Graph（解码约 +6%）：删掉下面一行即可
+      - --no-cuda-graph
+      # ================= 思考模式 =================
+      # 思考默认开启；要整体关闭，把下面两行的行首 "# " 删掉即可
+      # - --no-thinking
+    # ---- 环境变量 ----
+    environment:
+      # 常驻窗口（显存内 KV 窗口目标；设备池仍受显存封顶）：65536；瘦身件档改 131072
+      NINFER_KV_WINDOW: "65536"
+      # 环线的三个必需开关（与 start-fusion.sh 同口径，别删）
+      NINFER_KV_RING: "1"                 # KVMem 环
+      NINFER_HOST_PAGEABLE: "1"           # 主机层可分页
+      NINFER_KV_REUSE_HOSTBACKED: "1"     # host-backed 复用（长会话免冷预填）
+      # NINFER_KV_RETRIEVE 故意不设（留空=引擎自动给检索预算）；
+      # ★ 千万别设 0 —— 超池时会"静默答错"（HTTP 200、答案看着合理但是错的，项目实测血账）
+      # 视觉开关（全量档）：NINFER_VISION: "off" 可关；驻留方式 NINFER_VISION_RESIDENCY: "overlay"
+      # 思考模式整体关闭也可加：NINFER_THINKING: "off"

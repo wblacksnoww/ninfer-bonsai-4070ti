@@ -1,6 +1,10 @@
 # =============================================================================
 # NInfer · Bonsai-2-27B 容器镜像 —— 引擎官方 Dockerfile 的国内源 + GPU 架构参数化版
 #
+# 双线共用（build-image.sh -l old|fusion 决定源树，本文件不变）:
+#   old    老生产线树（vendor/ninfer-4090w-ternary-a3）→ tag …-archXX
+#   fusion KVMem 环线树（vendor/ninfer-fusion-kvmem）→ tag …-archXX-fusion
+#
 # CUDA 版本说明（回应"13.1 还是 13.3"）:
 #   · 引擎 CMakeLists.txt 硬校验: CUDA >= 13.1（低于则 FATAL_ERROR），两者都能编
 #   · 本镜像默认 13.3.0 —— 对齐官方《兜底方案-从源码自己编译》依赖表与本机实测编译链
@@ -67,7 +71,11 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         ca-certificates libavcodec60 libavformat60 libavutil58 libcurl4t64 libswscale7; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    rm -rf /usr/local/cuda-13.3/compat /usr/local/cuda-13/compat /usr/local/cuda/compat
+# ↑ 删前向兼容库：CUDA 运行时镜像自带 /usr/local/cuda*/compat 里的新 libcuda.so，
+#   前向兼容只在数据中心卡上成立；GeForce 上加载器会挑中它，导致启动即
+#   cudaErrorCompatNotSupportedOnDevice（fusion 引擎上游 Dockerfile 同款处理，两线共用）
 
 COPY --from=build /build/apps/ninfer /usr/local/bin/ninfer
 COPY --from=build /build/apps/ninfer-serve /usr/local/bin/ninfer-serve

@@ -8,6 +8,8 @@
 #   docker compose -f docker/docker-compose.yml down       # 停止并移除（显存随容器释放）
 #
 # ⚠ 与宿主机 start-ninfer.sh / docker/run-ninfer.sh 互斥：共用一张卡，先停对方再启动
+# ⚠ 本文件是**老线**（A3 引擎 + v2 制品）；fusion KVMem 环线（v3 制品）见
+#    docker/docker-compose.fusion.yml（或 ./docker/run-ninfer.sh -l fusion）
 # =============================================================================
 name: ninfer
 
