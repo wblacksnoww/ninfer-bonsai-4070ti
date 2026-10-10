@@ -2,11 +2,17 @@
 # 自动打包：push 触达 docker/ 或 vendor/ 时自动构建容器镜像并发布到 GHCR
 # （镜像 = vendor 源码容器内编译；无需任何本地构建环境）
 #
-# 产物：ghcr.io/<owner>/ninfer-bonsai:cuda13.3-arch89 （RTX 40 系）
+# 产物（双线 4 腿，兼容新旧模型/算法）:
+#   ghcr.io/<owner>/ninfer-bonsai:cuda13.3-arch89         老线 A3 引擎（RTX 40 系，配 v2 制品）
+#   ghcr.io/<owner>/ninfer-bonsai:cuda13.3-arch120a       老线 A3 引擎（RTX 50 系）
+#   ghcr.io/<owner>/ninfer-bonsai:cuda13.3-arch89-fusion  fusion KVMem 环线（RTX 40 系，配 v3 制品）
+#   ghcr.io/<owner>/ninfer-bonsai:cuda13.3-arch120a-fusion fusion KVMem 环线（RTX 50 系）
 #
-# 2026-09-27 深夜 A3 更新：vendor 升级为 pkg2 r12 树（A3 引擎），device.h 参数化
-#   NINFER_SM_COUNT 且恢复 SM120 分支 → arch89 与 120a 均可编译（120a 由 CI 实测验证）。
-#   账本 bug 已在 r12 修复：服务不再需要 --no-prefix-reuse（旧树回滚时才要加回）。
+# 沿革：
+#   2026-09-27 A3 更新（老线）：vendor 升级 pkg2 r12 树；账本 bug 修复，
+#     服务不再需要 --no-prefix-reuse；arch89/120a 双架构 CI 实测通过。
+#   2026-10-10 v3.0.0（本文件当前形态）：新增 fusion KVMem 环线（vendor/ninfer-fusion-kvmem
+#     @ acba3d4）—— 矩阵扩为双线 4 腿；fusion 线 CUDA_ARCH 支持 80/86/89/120a（CMake 硬校验）。
 # =============================================================================
 name: docker-build
 
@@ -25,9 +31,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        cuda_arch: ["89", "120a"]   # A3 树 device.h 已含 SM120 分支，120a 恢复（CI 即验证）
       fail-fast: false
+      matrix:
+        include:
+          - { line: old,    arch: "89",   tag: "cuda13.3-arch89" }
+          - { line: old,    arch: "120a", tag: "cuda13.3-arch120a" }
+          - { line: fusion, arch: "89",   tag: "cuda13.3-arch89-fusion" }
+          - { line: fusion, arch: "120a", tag: "cuda13.3-arch120a-fusion" }
     steps:
       - uses: actions/checkout@v4
 
@@ -37,10 +47,10 @@ jobs:
           sudo docker image prune -af || true
           df -h /
 
-      - name: 构建镜像（容器内编译，CUDA_ARCH=${{ matrix.cuda_arch }}）
+      - name: 构建镜像（容器内编译，line=${{ matrix.line }}，CUDA_ARCH=${{ matrix.arch }}）
         env:
           NINFER_JOBS: "3"   # runner 4 核 16GB，比本机更保守，防 nvcc OOM/ICE
-        run: ./docker/build-image.sh -a "${{ matrix.cuda_arch }}"
+        run: ./docker/build-image.sh -l "${{ matrix.line }}" -a "${{ matrix.arch }}"
 
       - name: 登录 GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -48,5 +58,5 @@ jobs:
       - name: 推送 GHCR
         run: |
           IMG="ghcr.io/${{ github.repository_owner }}/ninfer-bonsai"
-          docker tag "ninfer-bonsai:cuda13.3-arch${{ matrix.cuda_arch }}" "$IMG:cuda13.3-arch${{ matrix.cuda_arch }}"
-          docker push "$IMG:cuda13.3-arch${{ matrix.cuda_arch }}"
+          docker tag "ninfer-bonsai:${{ matrix.tag }}" "$IMG:${{ matrix.tag }}"
+          docker push "$IMG:${{ matrix.tag }}"

@@ -1,7 +1,9 @@
 # =============================================================================
 # 自动发布 Release：推送 v* 标签（或手动填版本号触发）时自动执行：
-#   1. vendor 源码容器内编译 → 镜像（cuda13.3-arch89）
-#   2. 镜像推送 GHCR（版本号 + latest 双标签）
+#   1. vendor 源码容器内编译 → 双线镜像（老线 A3 + fusion KVMem，均 cuda13.3-arch89）
+#   2. 镜像推送 GHCR：
+#        老线   → <VER> / latest          （语义与 v2.0.0 之前一致，消费方无感）
+#        fusion → <VER>-fusion / latest-fusion
 #   3. 创建 GitHub Release，说明按谷歌开源风格模板：
 #      概述 Overview / 亮点 Highlights / 修复 Bug Fixes / 文档 Documentation /
 #      升级说明 Upgrade Notes / 已知问题 Known Issues / 制品 Artifacts
@@ -14,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（如 v1.0.0）。留空=只做构建演练，不发布"
+        description: "版本号（如 v3.0.0）。留空=只做构建演练，不发布"
         required: false
         default: ""
 
@@ -28,27 +30,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 释放磁盘空间（runner 预装组件约 25GB，CUDA 镜像需要）
+      - name: 释放磁盘空间（runner 预装组件约 25GB，两个 CUDA 镜像接连构建需要）
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghc || true
           sudo docker image prune -af || true
           df -h /
 
-      - name: 构建镜像（容器内编译，CUDA_ARCH=89）
+      - name: 构建镜像 · 老线（容器内编译，CUDA_ARCH=89）
         env:
           NINFER_JOBS: "3"   # runner 4 核 16GB，防 nvcc OOM/ICE
-        run: ./docker/build-image.sh -a "89"
+        run: ./docker/build-image.sh -l old -a "89"
 
-      - name: 登录并推送 GHCR（版本 tag + latest）
+      - name: 构建镜像 · fusion KVMem 环线（容器内编译，CUDA_ARCH=89）
+        env:
+          NINFER_JOBS: "3"
+        run: |
+          sudo docker image prune -f || true
+          ./docker/build-image.sh -l fusion -a "89"
+
+      - name: 登录并推送 GHCR（双线：版本 tag + latest）
         if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG="ghcr.io/${{ github.repository_owner }}/ninfer-bonsai"
           VER="${{ github.event.inputs.version || github.ref_name }}"
-          docker tag "ninfer-bonsai:cuda13.3-arch89" "$IMG:$VER"
-          docker tag "ninfer-bonsai:cuda13.3-arch89" "$IMG:latest"
+          docker tag "ninfer-bonsai:cuda13.3-arch89"        "$IMG:$VER"
+          docker tag "ninfer-bonsai:cuda13.3-arch89"        "$IMG:latest"
+          docker tag "ninfer-bonsai:cuda13.3-arch89-fusion" "$IMG:$VER-fusion"
+          docker tag "ninfer-bonsai:cuda13.3-arch89-fusion" "$IMG:latest-fusion"
           docker push "$IMG:$VER"
           docker push "$IMG:latest"
+          docker push "$IMG:$VER-fusion"
+          docker push "$IMG:latest-fusion"
 
       - name: 创建 GitHub Release（谷歌开源风格模板）
         if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
@@ -57,18 +70,27 @@ jobs:
           VER: ${{ github.event.inputs.version || github.ref_name }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          DIGEST="$(docker image inspect --format='{{index .RepoDigests 0}}' "ghcr.io/${OWNER}/ninfer-bonsai:$VER" 2>/dev/null || echo '见 GHCR 包页面')"
+          DIGEST_OLD="$(docker image inspect --format='{{index .RepoDigests 0}}' "ghcr.io/${OWNER}/ninfer-bonsai:$VER" 2>/dev/null || echo '见 GHCR 包页面')"
+          DIGEST_FUSION="$(docker image inspect --format='{{index .RepoDigests 0}}' "ghcr.io/${OWNER}/ninfer-bonsai:$VER-fusion" 2>/dev/null || echo '见 GHCR 包页面')"
           cat > release-notes.md <<EOF
           ## 概述 Overview
 
           NInfer · Bonsai-2-27B 三元模型 RTX 4070 Ti 12GB Linux 部署套件 \`${VER}\`。
-          容器镜像已随本 Release 自动构建并发布（vendor 源码容器内编译，CUDA 13.3，sm_89）。
+          自本版起为**双线**形态（兼容新旧模型与算法），容器镜像已随本 Release 自动构建并发布：
+
+          | 线 | 引擎 | 制品（容器格式） | 算法 | 镜像 tag |
+          |---|---|---|---|---|
+          | 老线（日常/生产） | A3（pkg2 r12 树） | \`artifacts-pq2.ninfer\`（v2，7.74 GiB） | fp8 KV + MTP K=3，112K 上下文，可并发 | \`${VER}\` / \`latest\` |
+          | fusion KVMem 环线（长上下文实验） | ninfer-fusion-kvmem @ acba3d4 | v3 三件（8.87/7.13/5.96 GiB） | rk4v4-e8 KV + 主机层 + DFlash2，262144 逻辑上下文，单并发 | \`${VER}-fusion\` / \`latest-fusion\` |
 
           ## 亮点 Highlights
 
-          - 一键容器化：\`./docker/build-image.sh && ./docker/fetch-model.sh && ./docker/run-ninfer.sh\`
-          - OpenAI 兼容服务（compose 逐参数注释管理，端口 8089）
-          - 实测：持续解码 76~84 tok/s、prefill 1700+ tok/s、上下文 112K（12GB 卡）
+          - **fusion KVMem 环线（本次新增）**：设备池 < 逻辑上下文成立——12GB 卡上逻辑上下文 262144；
+            长会话 host-backed 复用实测 44k token 追问 TTFT 19.5s → 270ms（cache 99.9%）
+          - 同脚本实测解码 **+45%~+98%**（117-184 vs 76-94 tok/s），32k 上下文解码 134.3 vs 69.7 tok/s；
+            代价：预填 -13%~-43%、短提示 TTFT +~170ms、单并发（环的硬约束）
+          - 老线语义完全不变（镜像 tag、参数、制品均向后兼容）；两条线同一张卡互斥切换
+          - CI 双线 4 腿（89/120a × 老线/fusion）自动构建；\`./docker/build-image.sh -l old|fusion\` 本地等价
 
           ## 修复 Bug Fixes
 
@@ -77,23 +99,39 @@ jobs:
 
           ## 文档 Documentation
 
-          - README（谷歌开源模板九节）、docker/README（部署与《模型制品》获取路线）、docs/（性能实测、踩坑实录）
+          - [docs/更新教程-v3.0.0.md](docs/更新教程-v3.0.0.md)：从 v2.0.0 升级全步骤 + 新旧兼容矩阵 + 回滚
+          - [docs/Fusion-KVMem-部署与运行.md](docs/Fusion-KVMem-部署与运行.md)：环线使用说明（三档/验收/调优/已知限制）
+          - [docs/性能实测.md](docs/性能实测.md)：双线 13 项对照；[docs/踩坑实录.md](docs/踩坑实录.md)：双线坑位
+          - [CHANGELOG.md](CHANGELOG.md)：更新记录
 
           ## 升级说明 Upgrade Notes
 
           \`\`\`bash
+          # 老线（与旧版行为一致，可直接替换）
           docker pull ghcr.io/${OWNER}/ninfer-bonsai:${VER}
           ./docker/run-ninfer.sh -i ghcr.io/${OWNER}/ninfer-bonsai:${VER}
+
+          # fusion 环线（需要 v3 制品）
+          docker pull ghcr.io/${OWNER}/ninfer-bonsai:${VER}-fusion
+          ./docker/fetch-model.sh --ms-fusion
+          ./docker/run-ninfer.sh -l fusion
           \`\`\`
+          制品（v2/v3）不随 Release 分发：魔搭镜像 xiuming/ninfer-bonsai-4070ti 或 \`fetch-model.sh\` 引导。
 
           ## 已知问题 Known Issues
 
-          - 仅支持 RTX 40 系（sm_89）：vendor 源码 device.h 暂不含 120a
-          - 服务端需 \`--no-prefix-reuse\`（上游 bug，脚本已内置）
+          - fusion 环线为**实验版本**（作者口径：初期版本不保证正确性/稳定性）：单并发硬约束、
+            约 95k 题面零命中反例未定位、视觉路径本线作者未验（待实测）、长冷预填后连接中断属缓解项
+          - fusion 环线只认 v3 制品（老 v2 制品会拒载）；老线只验过 v2 制品（混用矩阵见更新教程）
+          - 12GB 卡下列逻辑上下文 262144 但设备池被显存封顶（实测 ~5.5 万 token），超窗部分走检索
+          - 大海捞针验收脚本 [7]/[11] 两项在双线上都读"红"（脚本夹具怪癖，非引擎故障，已定性）
+          - RTX 50 系（sm_120a）双线镜像由 CI 构建实测；实卡运行未验（社区待反馈）
 
           ## 制品 Artifacts
 
-          - 容器镜像：\`ghcr.io/${OWNER}/ninfer-bonsai:${VER}\` 与 \`:latest\`（digest: \`${DIGEST}\`）
+          - 老线镜像：\`ghcr.io/${OWNER}/ninfer-bonsai:${VER}\` 与 \`:latest\`（digest: \`${DIGEST_OLD}\`）
+          - fusion 镜像：\`ghcr.io/${OWNER}/ninfer-bonsai:${VER}-fusion\` 与 \`:latest-fusion\`（digest: \`${DIGEST_FUSION}\`）
+          - 滚动 tag（CI 每次推送更新）：\`cuda13.3-arch89\` / \`arch120a\` / \`arch89-fusion\` / \`arch120a-fusion\`
           - 模型制品不随 Release 分发：见仓库 \`docker/fetch-model.sh\` 引导
           EOF
-          gh release create "$VER" --title "NInfer Bonsai 部署套件 $VER" --notes-file release-notes.md --generate-notes
+          gh release create "$VER" --title "NInfer Bonsai 部署套件 $VER（双线：A3 + fusion KVMem）" --notes-file release-notes.md --generate-notes
