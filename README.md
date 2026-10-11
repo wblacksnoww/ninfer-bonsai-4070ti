@@ -49,7 +49,9 @@ docker pull ghcr.io/ygxiuming/ninfer-bonsai:latest-fusion
 ```bash
 git clone https://www.modelscope.cn/xiuming/ninfer-bonsai-4070ti.git   # 国内直连，vendor+models 一次到位
 cd ninfer-bonsai-4070ti
-./scripts/start-ninfer.sh work       # 老线（端口 8088）；fusion 环线：./scripts/start-fusion.sh
+# 宿主直跑需先自编译引擎（vendor/ 只有源码），并把 scripts/start-ninfer.sh
+# 顶部路径块改成你的实际路径（作者机 sanyuan 布局可跳过）——步骤见下文安装/使用
+./scripts/start-ninfer.sh work       # 老线（端口 8088）；fusion 环线：./scripts/start-fusion.sh（引擎自编译同上）
 ```
 
 > - 不想本地编译镜像：`docker pull` 拉的就是 CI 编译好的双线镜像（4 个 tag，见下表）；
