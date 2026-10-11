@@ -1,21 +1,82 @@
-# NInfer · Bonsai-2-27B 三元模型 · RTX 4070 Ti 12GB Linux 部署实录
+# NInfer · Bonsai-2-27B 三元模型 · RTX 4070 Ti 12GB Linux 部署套件
 
-> **一句话**：把 50+ GB 的 Qwen3.8-27B 三元模型（Bonsai-2-27B，权重只剩 -1/0/+1），
-> 在一张 **12GB 显存的消费级显卡**上跑起来。**v3.0.0 起为双线形态**：
-> **老线**（A3 引擎）——出字 75~145+ tok/s、上下文 112K、可并发，生产可用；
-> **fusion KVMem 环线**（新）——逻辑上下文 **262K**、设备池可远小于上下文、长会话免冷预填，
-> 解码再快 **+45%~+98%**，代价是单并发 + 预填变慢
-> （详见 [双线对照](docs/性能实测.md#9-双线对照fusion-kvmem-环线-vs-老线2026-10-10同脚本同卡)）。
-> 本仓库是全流程实录：依赖、编译、权重、启动、验证、踩坑、性能数据——照着做即可复现；
-> 也提供 **Docker 容器化一键部署与云端自动打包**（双线镜像）。
+[![docker-build](https://github.com/ygxiuming/ninfer-bonsai-4070ti/actions/workflows/docker-build.yml/badge.svg)](https://github.com/ygxiuming/ninfer-bonsai-4070ti/actions/workflows/docker-build.yml)
+[![release](https://github.com/ygxiuming/ninfer-bonsai-4070ti/actions/workflows/release.yml/badge.svg)](https://github.com/ygxiuming/ninfer-bonsai-4070ti/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![ModelScope 镜像](https://img.shields.io/badge/%E9%AD%94%E6%90%AD%E9%95%9C%E5%83%8F-xiuming%2Fninfer--bonsai--4070ti-8A2BE2)](https://modelscope.cn/models/xiuming/ninfer-bonsai-4070ti)
 
-- **适用硬件**：RTX 40 系（sm_89）。本文在 **RTX 4070 Ti 12GB** 实测；
-  官方在 **RTX 4080 SUPER（32GB 魔改）** 验证过（262K 上下文 / decode 226 tok/s）。
-  RTX 50 系：老线 A3 树 device.h 已含 SM120（CI 双架构实测）；fusion 树 CMake 亦支持 120a
-  （CI 构建，实卡未验）。
-- **适用系统**：**Linux x64**（Ubuntu 26.04 实测；Windows 请直接用官方交付包的 exe）。
-- **最终形态**：OpenAI 兼容 HTTP 服务（`/v1/chat/completions`），支持思考模式；
-  两线模型 id 同为 `qwen3.8-27b`（客户端切换无感）。
+把 50+ GB 的 Qwen3.8-27B 三元模型（Bonsai-2-27B，权重只剩 -1/0/+1，2.125 bpw），在一张
+**12GB 显存的消费级显卡**上跑成 OpenAI 兼容 HTTP 服务。本仓库是一套**照做即通的部署套件**：
+引擎源码、启动脚本、Docker 容器、云端自动打包、全流程教程与实测数据都齐——依赖、编译、
+权重、启动、验证、踩坑、性能，每一步都有判据。
+
+**v3.0.0 起为双线形态**（兼容新旧模型与算法，同一张卡互斥切换）：
+
+- **老线（A3 引擎）**：出字 75~145+ tok/s、上下文 112K、支持并发，生产可用；
+- **fusion KVMem 环线（新，实验）**：逻辑上下文 **262K**（设备池可远小于它，超窗自动检索）、
+  解码再快 **+45%~+98%**，代价是单并发 + 预填变慢（[双线对照](docs/性能实测.md#9-双线对照fusion-kvmem-环线-vs-老线2026-10-10同脚本同卡)）。
+
+| | 说明 |
+|---|---|
+| 适用硬件 | RTX 40 系（sm_89），12GB 显存起步，本文在 **RTX 4070 Ti 12GB** 实测；RTX 50 系镜像由 CI 双架构构建（实卡未验） |
+| 适用系统 | **Linux x64**（Ubuntu 26.04 实测；Windows 请直接用官方交付包的 exe） |
+| 交付形态 | OpenAI 兼容 HTTP 服务（`/v1/chat/completions`），支持思考模式；两线模型 id 同为 `qwen3.8-27b` |
+
+---
+
+## 快速开始
+
+**方式一：容器线（推荐——宿主机只需 NVIDIA 驱动 + Docker，无需装 CUDA/FFmpeg）**
+
+```bash
+git clone https://github.com/ygxiuming/ninfer-bonsai-4070ti.git
+cd ninfer-bonsai-4070ti
+
+# —— 老线（日常/生产）：出字 75~145+ tok/s、112K 上下文、可并发 ——
+docker pull ghcr.io/ygxiuming/ninfer-bonsai:latest           # CI 容器内编译的成品镜像
+./docker/fetch-model.sh --ms                                 # 下载 v2 制品 7.8GB（国内直连 + SHA256 校验）
+./docker/run-ninfer.sh -i ghcr.io/ygxiuming/ninfer-bonsai:latest   # 起服务，宿主端口 8089
+./docker/test-serving.sh                                     # 冒烟：模型列表 + 一次真实生成
+
+# —— fusion KVMem 环线（实验：262K 逻辑上下文、解码 +45~98%、单并发）——
+./docker/fetch-model.sh --ms-fusion                          # 下载 v3 三件约 22GB（可单件：--ms-fusion full）
+docker pull ghcr.io/ygxiuming/ninfer-bonsai:latest-fusion
+./docker/run-ninfer.sh -l fusion -i ghcr.io/ygxiuming/ninfer-bonsai:latest-fusion
+```
+
+**方式二：宿主直跑（已装 CUDA 13.1+/ffmpeg 开发库；或想连模型一起拿，走魔搭克隆）**
+
+```bash
+git clone https://www.modelscope.cn/xiuming/ninfer-bonsai-4070ti.git   # 国内直连，vendor+models 一次到位
+cd ninfer-bonsai-4070ti
+./scripts/start-ninfer.sh work       # 老线（端口 8088）；fusion 环线：./scripts/start-fusion.sh
+```
+
+> - 不想本地编译镜像：`docker pull` 拉的就是 CI 编译好的双线镜像（4 个 tag，见下表）；
+>   本地自建等价物是 `./docker/build-image.sh [-l fusion]`。
+> - GHCR 包首次发布默认私有，需在 GitHub 网页 → Packages → ninfer-bonsai → Package settings
+>   改 **Public**（一次性，之后所有 tag 匿名可拉）。
+> - 两条宿主线同端口 8088、同卡互斥，切换前先停对方（脚本有端口预检）。
+
+### 双线镜像 tag 速查
+
+| Tag（`ghcr.io/ygxiuming/ninfer-bonsai:` 前缀） | 线 | GPU |
+|---|---|---|
+| `latest` / `v3.0.0` / `cuda13.3-arch89` | 老线 | RTX 40 系 |
+| `cuda13.3-arch120a` | 老线 | RTX 50 系 |
+| `latest-fusion` / `v3.0.0-fusion` / `cuda13.3-arch89-fusion` | fusion 环线 | RTX 40 系 |
+| `cuda13.3-arch120a-fusion` | fusion 环线 | RTX 50 系 |
+
+### 文档地图
+
+| 想做什么 | 看哪篇 |
+|---|---|
+| 从 v2.0.0 升级 / 新机完整搭建（含新旧兼容矩阵与回滚） | [docs/更新教程-v3.0.0.md](docs/更新教程-v3.0.0.md) |
+| fusion 环线使用说明（三档/验收/调优/已知限制） | [docs/Fusion-KVMem-部署与运行.md](docs/Fusion-KVMem-部署与运行.md) |
+| 性能实测与双线 13 项对照 | [docs/性能实测.md](docs/性能实测.md) |
+| 踩坑与排障（双线 17+ 坑位） | [docs/踩坑实录.md](docs/踩坑实录.md) |
+| 容器化细节（镜像/制品/参数逐项注释） | [docker/README.md](docker/README.md) |
+| 更新记录 | [CHANGELOG.md](CHANGELOG.md) |
 
 ---
 
@@ -51,7 +112,9 @@ Bonsai-2-27B 三元权重（GGUF，6.7 GB，值域 {-1,0,+1}，2.125 bpw）
 你的显卡 —— OpenAI 兼容 HTTP 服务
 ```
 
-**双线形态（v3.0.0）**：同一个模型、两种引擎容器世代，按用途选线（同一张卡互斥切换）：
+### 双线形态（v3.0.0）
+
+同一个模型、两种引擎世代，按用途选线（同一张卡互斥切换）：
 
 | | 老线（A3 引擎） | fusion KVMem 环线（新） |
 |---|---|---|
@@ -66,7 +129,7 @@ Bonsai-2-27B 三元权重（GGUF，6.7 GB，值域 {-1,0,+1}，2.125 bpw）
 > 两代容器**硬校验互斥**（v2 魔数第 8 字节 02 / v3 为 03，引擎各认各代），无混搭路径 ——
 > 升级是"并存"不是"替换"，兼容矩阵与升级步骤见 [docs/更新教程-v3.0.0.md](docs/更新教程-v3.0.0.md)。
 
-**三层精度账（每层都有实测）**：
+### 三层精度账（每层都有实测）
 
 | 层 | 损耗 | 证据 |
 |---|---|---|
@@ -141,7 +204,7 @@ MTP 接受率 81.75%）、**262K 上下文**、prefill 2230 tok/s、运行时 8.
 | 件 | 版本 | 备注 |
 |---|---|---|
 | NVIDIA 驱动 | ≥ 580（本文 595.91） | 支持 CUDA 13.x 即可 |
-| **CUDA Toolkit** | **13.1+**（本文 13.3） | 引擎 CMake 硬检查 `CUDA >= 13.1` |
+| **CUDA Toolkit** | 老线宿主编译 **≥ 13.1**；fusion 环线宿主编译 **≥ 12.8**（本文 13.3） | 各引擎树 CMake 硬检查（老树 13.1 / fusion 树 12.8）；**容器线不需要装**（镜像自带 CUDA 13.3） |
 | GCC / G++ | 15.2 | CUDA 13.3 支持的宿主编译器 |
 | CMake | ≥ 3.28 | pip 装 `cmake` 即可，免 sudo |
 | Ninja | 任意近期版 | 同上 |
@@ -156,9 +219,9 @@ sudo apt install -y build-essential libavformat-dev libavcodec-dev \
   libavutil-dev libswscale-dev libcurl4-openssl-dev pkg-config
 ```
 
-### 快速开始
+### 获取本仓库
 
-### 获取本仓库（① 推荐魔搭，国内直连且自带全部制品：v2 一件 + v3 三件，约 30GB）
+**① 推荐魔搭（国内直连且自带全部制品：v2 一件 + v3 三件，约 30GB）**：
 
 ```bash
 git clone https://www.modelscope.cn/xiuming/ninfer-bonsai-4070ti.git
@@ -168,9 +231,10 @@ cd ninfer-bonsai-4070ti      # vendor/ 源码 + models/ 制品一次到位，全
 #   modelscope download xiuming/ninfer-bonsai-4070ti models/fusion/Ternary-Bonsai-2-27B-ninfer-v3.ninfer --local_dir .   # fusion 全量件
 ```
 
-GitHub 仓库（内容一致，不含模型）：https://github.com/ygxiuming/ninfer-bonsai-4070ti
+**② GitHub 仓库**（内容一致，不含模型）：https://github.com/ygxiuming/ninfer-bonsai-4070ti
+（模型制品用 `./docker/fetch-model.sh [--ms|--ms-fusion]` 引导获取。）
 
-### 部署三条路，按你的情况选**：
+### 三条部署路，按你的情况选
 
 | | 容器化（本仓库自带源码） | 路径 A：官方交付包 | 路径 B：自打包 |
 |---|---|---|---|
@@ -180,21 +244,19 @@ GitHub 仓库（内容一致，不含模型）：https://github.com/ygxiuming/ni
 | 适合 | **绝大多数人（推荐）** | 已有交付包者 | 想要全开源链路 / 极客 |
 | 耗时 | 首次 ~40 分钟（含镜像下载） | ~30 分钟（含编译） | ~半天（含 50GB 下载） |
 
-**容器化三步**（宿主机只需 NVIDIA 驱动 + Docker，无需装 CUDA/FFmpeg；双线由 `-l` 选）：
+**容器化**（宿主机只需 NVIDIA 驱动 + Docker；双线由 `-l` 选）：
 
 ```bash
-./docker/build-image.sh          # 老线镜像（vendor 源码容器内编译，apt 自动走清华源）
+./docker/build-image.sh             # 老线镜像（vendor 源码容器内编译，apt 自动走清华源）
 ./docker/build-image.sh -l fusion   # fusion 环线镜像（→ tag …-arch89-fusion）
-./docker/fetch-model.sh          # 老线 v2 制品校验/落位（SHA256）；fusion 用 --ms-fusion 取 v3 三件
-./docker/run-ninfer.sh           # 起老线服务（端口 8089）；fusion：./docker/run-ninfer.sh -l fusion
-./docker/test-serving.sh         # 冒烟：模型列表 + 一次真实生成
+./docker/fetch-model.sh             # 老线 v2 制品校验/落位（SHA256）；fusion 用 --ms-fusion 取 v3 三件
+./docker/run-ninfer.sh              # 起老线服务（端口 8089）；fusion：./docker/run-ninfer.sh -l fusion
+./docker/test-serving.sh            # 冒烟：模型列表 + 一次真实生成
 ```
 
-> **跳过本地编译**：CI 已自动构建并发布双线镜像，直接拉取——
-> `docker pull ghcr.io/ygxiuming/ninfer-bonsai:latest`（老线）或 `:latest-fusion`（fusion 环线），
-> 然后 `./docker/run-ninfer.sh -i <镜像>`（fusion 再加 `-l fusion`）。
-> 首次需把 GHCR 包在网页上设为 Public（见 `docker/README.md`《自动打包》）。
-> 容器参数逐项注释见 [docker/docker-compose.yml](docker/docker-compose.yml)（老线）与
+> **跳过本地编译**：CI 已自动构建并发布双线镜像，直接拉取（见文首[快速开始](#快速开始)与
+> [tag 速查](#双线镜像-tag-速查)）。容器参数逐项注释见
+> [docker/docker-compose.yml](docker/docker-compose.yml)（老线）与
 > [docker/docker-compose.fusion.yml](docker/docker-compose.fusion.yml)（fusion）；
 > 制品的获取方式见 [docker/README.md](docker/README.md)《模型制品》节。
 
@@ -211,6 +273,7 @@ GitHub 仓库（内容一致，不含模型）：https://github.com/ygxiuming/ni
 | 文件哈希值 | 各档制品 SHA256 清单 | https://pan.quark.cn/s/d6789d82692e |
 
 > 直链为 2026-09-27 深夜更新版（A3 引擎世代）；旧链接失效以本表为准。
+> v3 三件（fusion 环线用）来自"模型包-20260930"：https://pan.quark.cn/s/ab6718583f2f
 
 指南与技术文档：[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/models/shensanshu/ninfer-ada-ternary)（魔搭）。
 
@@ -424,7 +487,7 @@ python3 scripts/fusion_accept_test.py   # fusion 环线验收：短问答 + 40 �
 
 ### 踩坑实录
 
-全部是本文真实踩过的坑，按出现顺序。完整版（含 Windows 侧）见 [docs/踩坑实录.md](docs/踩坑实录.md)。
+全部是本文真实踩过的坑，按出现顺序。完整版（含 Windows 侧与双线坑位）见 [docs/踩坑实录.md](docs/踩坑实录.md)。
 
 | # | 症状 | 真因 / 处方 |
 |---|---|---|
@@ -435,7 +498,7 @@ python3 scripts/fusion_accept_test.py   # fusion 环线验收：短问答 + 40 �
 | 5 | nvcc 并发编译 GCC 段错误 | TMPDIR 在 tmpfs ⇒ `export TMPDIR=$PWD/tmp-nvcc` |
 | 6 | 偶发 `cc1plus` ICE | 重试 / `-j6`（多路 nvcc 并发所致） |
 | 7 | CMake 配置失败 `libswscale not found` | Linux 线强制 ffmpeg 开发库 ⇒ apt 装"依赖"节列出的包 |
-| 8 | `--spec dflash2` 报 `artifact has no DFlash2 weight bundle` | 现有制品都不带 DFlash2 束 ⇒ 只能用 MTP（K≤5） |
+| 8 | `--spec dflash2` 报 `artifact has no DFlash2 weight bundle` | 老线 v2 制品不带 DFlash2 束 ⇒ 老线只能用 MTP（K≤5）；要 DFlash2 走 fusion 环线 + v3 制品 |
 | 9 | K=6/7 报 `T must be in [2,6]` | MTP 内核硬限：T=窗口+1≤6 ⇒ **K=5 是上限**（改三处校验也没用） |
 | 10 | K=5 接受率远低于官方 226 t/s 的口径 | 交付源码树比官方二进制旧 3KB（草稿策略改进未开源）⇒ decode 有差距，prefill/TTFT/上下文收益照拿 |
 | 11 | `pkill -f ninfer-serve` 把自己的脚本杀了 | 模式匹配到自身命令行 ⇒ 用 `pgrep -x ninfer-serve` |
@@ -456,26 +519,26 @@ Linux 预编译。两条线制品不通用（.ninfer vs .gguf）。作者另发"
 https://pan.quark.cn/s/fd20cf86d3ca ——那是另一条引擎线，与本文不通用。
 
 **Q: 能开多路并发吗？**
-A: 引擎支持，但官方口径单路优先（每加一路单路掉 ~28%，聚合吞吐仍涨：本机 4 路聚合 336 t/s）。
-交互延迟优先就保持 1 路。
+A: 老线引擎支持，但官方口径单路优先（每加一路单路掉 ~28%，聚合吞吐仍涨：本机 4 路聚合 336 t/s）。
+交互延迟优先就保持 1 路。fusion 环线是单并发硬约束（环的设计）。
 
 **Q: 视觉（多模态）能用吗？**
-A: 制品含视觉塔（333 对象），启动加 `--vision` 即可（+0.27 GiB 权重 / +0.24 GiB 运行时）。
+A: 老线制品含视觉塔（333 对象），启动加 `--vision` 即可（+0.27 GiB 权重 / +0.24 GiB 运行时）。
 注意 `--vision` 与部分投机配置互斥，且一张图约吃 374 token 上下文。
-fusion 环线的全量件**默认开视觉**（瘦身件/PTQ1 件没有视觉塔）；显存紧时三个旋钮：
-`NINFER_VISION=off` / `NINFER_VISION_RESIDENCY=overlay`（塔放内存按图借显存）/ `=cpu`。
+fusion 环线的全量件**默认开视觉**（瘦身件/PTQ1 件没有视觉塔；视觉路径本线作者未验，见已知限制）；
+显存紧时三个旋钮：`NINFER_VISION=off` / `NINFER_VISION_RESIDENCY=overlay`（塔放内存按图借显存）/ `=cpu`。
 
 **Q: 为什么不用官方生产引擎？**
 A: 生产引擎二进制里没有三元量化支持（作者原话）。三元支持在 dev fork 线（v1.0.8 系），
 这也是所有社区移植（CraneBW / zatfung / 本仓库）的共同基线。
 
 **Q: 4090 / 5090 呢？**
-A: 4090 同 sm_89，照抄本文参数即可。5090（sm_120a）官方基线约为 4090 的 1.4-1.5×，
-但本仓库 vendor 源码（Ada fork）暂编不了 120a，需上游 Neroued 树（见 Roadmap）。
+A: 4090 同 sm_89，照抄本文参数即可。5090（sm_120a）官方基线约为 4090 的 1.4-1.5×；
+老线 A3 树 device.h 已含 SM120 分支，fusion 树 CMake 亦支持 120a（双线 120a 镜像均由 CI 构建，实卡未验）。
 
 **Q: RTX 30 系 / 更老的卡能跑吗？**
-A: NInfer 引擎只支持 sm_89/120a，容器化也不改变这一点。老卡走官方"超低显存档"的
-llama.cpp 线（SM 75~120a）。
+A: NInfer 引擎只支持 sm_89/120a（fusion 环线 CMake 另支持 80/86），容器化也不改变这一点。
+老卡走官方"超低显存档"的 llama.cpp 线（SM 75~120a）。
 
 **Q: fusion 环线（新线）和老线怎么选？**
 A: 按任务选，同一张卡互斥切换：短问答/日常生产/要并发的场景用**老线**（快、稳、支持并发）；
@@ -499,6 +562,7 @@ v3 三件（约 22GB）只在启用 fusion 环线时需要；老线制品与镜�
 - [x] **262K 逻辑上下文**（v3.0.0 fusion 环线：设备池 + 主机层 + 按需检索达成，
       12GB 卡实测首跑；见 [docs/Fusion-KVMem-部署与运行.md](docs/Fusion-KVMem-部署与运行.md)）
 - [x] **双线容器化**（v3.0.0：`-l old|fusion` 双线镜像 + CI 四腿矩阵 + release 双线发布）
+- [x] **超窗检索首测**（147k token 题面 = 设备池 2.7 倍，针测两轮 PASS，追问轮 cache 100% / TTFT 1.0s）
 - [ ] fusion 环线视觉路径实测（引擎与全量件都带视觉载荷，但环线作者未验；待本机红图对照）
 - [ ] fusion 环线约 95k 题面"零命中"反例定位（上游账本未解，等新源码批或复现归档）
 - [ ] 官方 20 基准完整复测（对照 98.2% 保留口径，需从白皮书/eval 配置搭基准集）
@@ -541,7 +605,7 @@ Issue / PR 欢迎。改 `scripts/` 或 `docker/` 请先跑 `python3 scripts/benc
   已知限制见 [Fusion 说明](docs/Fusion-KVMem-部署与运行.md) §7（单并发/视觉未验/95k 反例）。
 - **容器线（双线）**：老线镜像沿用（v2.0.0 已验证，双入口冒烟 83.8 / 85.2 tok/s）；
   fusion 镜像由 CI 构建发布（`-arch89-fusion` / `-arch120a-fusion`），本地 `build-image.sh -l fusion` 等价。
-- **发布**：`v3.0.0` 已发布（GitHub Release 谷歌风格模板 + GHCR 双线镜像
+- **发布**：`v3.0.0`（GitHub Release 谷歌风格模板 + GHCR 双线镜像
   `v3.0.0`/`latest`（老线）与 `v3.0.0-fusion`/`latest-fusion`；CI 四腿矩阵 89/120a × 老线/fusion）。
 - **魔搭镜像**：https://modelscope.cn/models/xiuming/ninfer-bonsai-4070ti
   （含 v2 制品 7.8GB + v3 三件约 22GB，国内直连）。
