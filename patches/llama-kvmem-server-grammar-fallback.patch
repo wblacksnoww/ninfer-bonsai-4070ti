@@ -1,0 +1,42 @@
+diff --git a/tools/llama-kvmem-server.cpp b/tools/llama-kvmem-server.cpp
+index 3d8014b..c42f428 100644
+--- a/tools/llama-kvmem-server.cpp
++++ b/tools/llama-kvmem-server.cpp
+@@ -2319,17 +2319,29 @@ int main(int argc, char ** argv) {
+         const bool parse_tools = !cr.tools.empty() &&
+                 cr.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+ 
++        // 2026-10-16 补丁（本机）：工具的 JSON schema 可能生成 llama.cpp 解析不了的
++        // 工具调用语法（例：ZCode 的 ReplyToChannel text.maxLength=2000 触发
++        // llama-grammar.cpp 的 MAX_REPETITION_THRESHOLD=2000 保护）。语法挂掉时
++        // 应该丢掉「语法约束」继续推理，而不是把整个请求拒掉 —— 否则开着视觉 /
++        // 用户检索策略时会被下面的守卫拒成 400（"MTP sampler could not initialize"）。
+         bool use_spec = st.spec.ok;
+         if (use_spec && !sparams.grammar.empty()) {
+-            try {
+-                common_params_sampling probe = sparams;
+-                common_sampler_ptr test(common_sampler_init(st.model, probe));
+-                if (!test) {
+-                    use_spec = false;
++            auto sampler_probe_ok = [&]() {
++                try {
++                    common_params_sampling probe = sparams;
++                    common_sampler_ptr test(common_sampler_init(st.model, probe));
++                    return static_cast<bool>(test);
++                } catch (const std::exception &) {
++                    return false;
+                 }
+-            } catch (const std::exception & e) {
+-                fprintf(stderr, "KVMEM_TRACE spec sampler init failed (%s); greedy fallback\n", e.what());
+-                use_spec = false;
++            };
++            if (!sampler_probe_ok()) {
++                fprintf(stderr,
++                        "KVMEM_TRACE grammar sampler init failed; dropping grammar constraint\n");
++                sparams.grammar = common_grammar{};
++                sparams.grammar_lazy = false;
++                sparams.grammar_triggers.clear();
++                use_spec = sampler_probe_ok();
+             }
+         }
+ 

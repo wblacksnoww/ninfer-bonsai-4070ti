@@ -23,6 +23,9 @@ __pycache__/
 *.pyc
 HANDOFF.md
 
+# 本地工作数据（会话记忆等），不随仓库分发
+.workbuddy/
+
 # 魔搭上传缓存（scripts/upload-modelscope.sh 生成）
 .ms_upload_cache
 
