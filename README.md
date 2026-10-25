@@ -485,6 +485,111 @@ python3 scripts/fusion_accept_test.py   # fusion 环线验收：短问答 + 40 �
 
 ---
 
+### 30 系（sm_86）：路线 A 省显存档（llama.cpp + KVMem）速查
+
+30 系跑不了上面的 ninfer 线，走**官方另一条线**（llama.cpp + KVMem）。本仓库已在
+**RTX 3060 12GB** 上完整落地、实测、并把日常运维都跑通了 —— 细节见
+**[docs/省显存档-路线A-sm86实测.md](docs/省显存档-路线A-sm86实测.md)**，这里只放最常用的：
+
+```bash
+cd ninfer-bonsai-4070ti
+./scripts/start-kvmem.sh long     # 起服务：256K 上下文档（含视觉 + MTP + 压缩代理）
+./scripts/start-kvmem.sh status   # 看状态（引擎 + 代理分别报告）；logs 跟日志
+./scripts/start-kvmem.sh stop     # 停掉（打游戏 / 跑视频生成前必做）
+```
+
+客户端接 **`http://127.0.0.1:18210/v1`**（自动压缩代理），不要直接接 18202 ——
+代理会在历史超 4.5 万 token 时自动把早期对话压成滚动摘要，**长会话不再每轮等十几分钟**
+（实测 1.4 万 token 会话 → 引擎只收 1534 tok，且关键记忆点保住）。只要引擎：`KVMEM_PROXY=0`。
+
+| 默认开启 | 关闭方式 |
+|---|---|
+| 视觉（能贴图） | `KVMEM_VISION=0` |
+| MTP1 投机解码（+15~22% 出字） | `KVMEM_MTP=0` |
+| 上下文压缩代理（18210 端口） | `KVMEM_PROXY=0` |
+
+| 档位 | 逻辑上下文 | GPU 窗口 | 单轮输出上限 | 提示上限 | 用途 |
+|---|---|---|---|---|---|
+| `work` | 131072 | 24K 检索 + 10K 生成 | 10240 | 120832 | 默认 |
+| `long` | **262144** | 同上 | 10240 | **251904** | 长会话（已实测：12.1 万 token 请求通过） |
+| `low` | 65536 | 12K + 6K | 6144 | 59392 | 边办公边跑 |
+| `fast` | 8192 | 4K + 2K | 2048 | 6144 | 最省显存 |
+
+**三条硬规则**（踩过才知道）：
+
+1. **提示 token ≤ 上下文 − 单轮预留**（work 档 = 120832）。超了会被**秒拒**：
+   `{"error":"prompt + max_tokens exceeds n_ctx"}` —— 这不是卡住、也不是模板问题，就是**会话太长了**。
+   处置：新开会话 / `KVMEM_RESERVE=4096 ./scripts/start-kvmem.sh work` 让出空间 / 直接用 `long` 档。
+2. **单轮输出 ≤ 预留**（10240，**思考 token 也算在内**），超了截断（`finish_reason: length`）。
+3. **重启服务 = 清空 KVMem 缓存** → 长会话的下一个请求要全量重算（12 万 token ≈ 9.5 分钟）。别频繁重启。
+
+**接客户端（ZCode / Chatbox 等）**：Base URL 填 `http://127.0.0.1:18210/v1`（压缩代理；
+`KVMEM_PROXY=0` 只起引擎时改填 `http://127.0.0.1:18202/v1`），API Key 随便填，
+模型名随便填。**第一次接之前先跑一次** `./patches/apply-kvmem-compat.sh models/Ternary-Bonsai-2-27B-PTQ1_0.gguf`
+—— 它会给模型自带的聊天模板打两个兼容补丁，修掉两类"整轮 400"（都不需要重编引擎，
+`start-kvmem.sh` 会自动挂上生成的模板）：
+
+| 客户端行为 | 模板报错（服务端原文） | 补丁做了什么 |
+|---|---|---|
+| 发 `reasoning_effort:"high"`（ZCode 默认） | `Unexpected reasoning effort high. Supported types are xhigh…` | high/max→xhigh、minimal→low、未知→xhigh |
+| 把技能清单/环境提醒当 **system 消息插在会话中间**（ZCode 实测在 messages[3]） | `System message must be at the beginning.`（**53 毫秒秒拒**） | 非首条 system 消息按 user 轮渲染，内容保留 |
+
+ZCode 实测：首轮约 100 秒（2.2 万 token 系统提示 + 33 个工具），**第二轮起 1~2 秒**。
+
+**判断它在干活还是卡住**：
+
+```bash
+tail -3 "$(ls -t ~/kvmem-logs/kvmem-*.log | head -1)"   # 自动挑最近在写的那个
+# 日志文件名跟档位走：work→kvmem-work.log，long→kvmem-long.log，别翻错文件
+```
+
+一行日志怎么读（都是**毫秒**，`1384.52 ms` = 1.38 秒）：
+
+| 字段 | 意思 |
+|---|---|
+| `prompt eval time = 1384 ms / 274 tokens (198 t/s)` | **读你的输入**用了 1.38 秒 —— 慢一般慢在这一项 |
+| `cache = 0` / `cache = 12xxxx` | 没命中缓存 / 命中了（复用了几万 token）。**`cache = 0` 本身不可怕**：几百 token 照样秒回；可怕的是 `cache = 0` **配上几万 token 输入**，那要等几分钟 |
+| `eval time = 236 ms / 9 tokens (38 t/s)` | **写回答**用了 0.24 秒 |
+| `total time = 1620 ms` | 整个请求 1.62 秒 —— 几秒内都算正常 |
+| `prompt processing ... progress = 0.64` | 正在预填充，`progress` 在涨就是正常（后面是当前速度） |
+| `n_gen = ..., tg = xx t/s` | 正在出字 |
+| 日志完全不动 | 这才叫卡住 |
+
+**想用容器跑这条线**（换机器、隔离环境）—— **两种拿镜像的方式，任选**：
+
+| 方式 | 怎么做 | 要编译吗 |
+|---|---|---|
+| ① **直接从 CI 拉编好的镜像**（推荐；别的机器零依赖） | `docker pull ghcr.io/wblacksnoww/llama-kvmem-bonsai:cuda13.3-arch86`<br>（包默认私有：先 `docker login ghcr.io`，或网页把它设为 Public） | ❌ **不用** |
+| ② 本机自建 | `./docker/build-kvmem-image.sh`（约 15 分钟） | ✅ |
+
+两种方式都还需要三样**镜像里没有**的东西：**模型**（放进 `models/`，镜像不含权重）、
+**NVIDIA 驱动 + nvidia-container-toolkit**、**架构匹配**（`arch86` 只能 RTX 30 系）。
+镜像内含引擎（sm_86 已编好）+ CUDA 用户态库 + 压缩代理 + 客户端兼容模板；
+起服务用 `docker compose -f docker/kvmem/docker-compose.kvmem.yml up -d`
+（拉来的镜像只需在同目录放一行 `.env` 指过去）。细节见 **[docker/kvmem/README.md](docker/kvmem/README.md)**。
+（注意：`docker/` 下那套 ninfer 镜像只支持 sm_89/120a，与 30 系无关。）
+
+**想做视频生成？** 12GB 卡能玩但只在"尝鲜档"（480p / 约 5 秒 / 每条十几分钟起步），
+选型、约束与施工步骤见 **[docs/本地视频生成-方案与约束.md](docs/本地视频生成-方案与约束.md)**。
+注意视频模型与文字模型**抢显存**，跑之前先 `./scripts/start-kvmem.sh stop`。
+
+**看图（视觉）—— 默认开启**：视觉塔已装好（`models/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf`，0.63 GB，
+sha256 已核对官方值），启动时**自动挂上**，贴图直接可用（显存 +约 0.6 GB）。
+
+```bash
+./scripts/start-kvmem.sh long                      # 默认就带视觉
+KVMEM_VISION=0 ./scripts/start-kvmem.sh long       # 显存紧张时关掉视觉
+KVMEM_VISION_CPU=1 ./scripts/start-kvmem.sh long   # 保留视觉但把编码器放 CPU
+```
+
+实测（RTX 3060 12GB）：首次带图请求 76 秒（含编码器加载），之后同一张图 **2.2 秒**；
+中文表格截图能逐字读对表头（14.7 秒 / 2067 提示 token）。
+不挂视觉时发图会直接失败（日志 `multimodal_error: multimodal prefill failed or cancelled`，
+客户端表现为"一个 token 都不出"）。
+
+**打游戏前先停服务**：游戏和模型都要显存，12GB 不够分（实测见 §8 症状表）。
+
+
 ## 支持（Support）
 
 ### 踩坑实录
