@@ -19,7 +19,9 @@ name: docker-build
 on:
   push:
     branches: [main]
-    paths: ["docker/**", "vendor/**", ".github/workflows/docker-build.yml"]
+    # docker/kvmem/ 是 30 系（sm86）llama.cpp+KVMem 线的内容，剔除以免误触本线构建
+    # （那条线的镜像由 docker-build-kvmem.yml 负责）
+    paths: ["docker/**", "!docker/kvmem/**", "vendor/**", ".github/workflows/docker-build.yml"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -60,3 +62,4 @@ jobs:
           IMG="ghcr.io/${{ github.repository_owner }}/ninfer-bonsai"
           docker tag "ninfer-bonsai:${{ matrix.tag }}" "$IMG:${{ matrix.tag }}"
           docker push "$IMG:${{ matrix.tag }}"
+
